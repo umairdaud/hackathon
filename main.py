@@ -31,19 +31,19 @@ def setup_config():
     # Setup Agents
     spanish_agent = Agent(
         name="spanish_agent",
-        instructions="You translate the user's message to Spanish",
+        instructions="You will teach the user Spanish language",
         model=secrets.gemini_api_model,
     )
 
     french_agent = Agent(
         name="french_agent",
-        instructions="You translate the user's message to French",
+        instructions="You will teach the user French language",
         model=secrets.gemini_api_model,
     )
 
     italian_agent = Agent(
         name="italian_agent",
-        instructions="You translate the user's message to Italian",
+        instructions="You will teach the user Italian language",
         model=secrets.gemini_api_model,
     )
 
@@ -51,10 +51,10 @@ def setup_config():
     triage_agent = Agent(
         name="triage_agent",
         instructions=(
-            "You are a translation agent. You use the tools given to you to translate."
-            "If asked for multiple translations, you call the relevant tools in order."
-            "You never translate on your own, you always use the provided tools." 
-            "Also mention which tool you used for translation."
+            "You are a language teaching agent. You will use the tools given to you to teach languages. you will start conversation in English."
+            "If user asks you to teach them a certain language, you will teach them like a 5 year old. you will call the relevant tools in order."
+            "You will never teach on your own, you always use the provided tools." 
+            "Also mention which tool you used for teaching certain language."
         ),
         tools=[
             spanish_agent.as_tool(
@@ -81,18 +81,18 @@ async def start():
     triage_agent = setup_config()
     cl.user_session.set("triage_agent", triage_agent)
     cl.user_session.set("chat_history", [])
-    await cl.Message(content="Welcome to the Panaversity AI Assistant!").send()
+    await cl.Message(content="Hi! Welcome to the Languisto. How we can help you today!").send()
 
 
 @cl.on_message
 async def main(message: cl.Message):
     """Process incoming messages and generate responses."""
     # Send a thinking message
-    msg = cl.Message(content="")
+    msg = cl.Message(content="Thinking...")
     await msg.send()
 
     # Retrieve the AI agent from the session
-    triage_agent = cast(Agent, cl.user_session.get("agent"))
+    triage_agent = cast(Agent, cl.user_session.get("triage_agent"))
 
     # Get the chat history from the session
     chat_history: list = cl.user_session.get("chat_history") or []
@@ -104,22 +104,18 @@ async def main(message: cl.Message):
     result = Runner.run_streamed(triage_agent, input=chat_history)
     
     async for event in result.stream_events():
-            if event.type == "raw_response_event" and hasattr(event.data, 'delta'):
-                token = event.data.delta
-                await msg.stream_token(token)
-
+        if event.type == "raw_response_event" and hasattr(event.data, 'delta'):
+            token = event.data.delta
+            await msg.stream_token(token)
+            
     response_content = result.final_output
 
-    chat_history.append({"role": "assistant", "content": msg.content})
-    cl.user_session.set("chat_history", chat_history)
+    # Update the thinking message with the actual response
+    msg.content = response_content
     await msg.update()
 
-    # Update the thinking message with the actual response
-    # msg.content = response_content
-    # await msg.update()
+    # Add response to chat history
+    chat_history.append({"role": "assistant", "content": response_content})
+    cl.user_session.set("chat_history", chat_history)
 
-    # history.append({"role": "assistant", "content": response_content})
-
-    # cl.user_session.set("chat_history", history)
-
-    # print(f"History: {history}")
+    print(f"History: {chat_history}")
