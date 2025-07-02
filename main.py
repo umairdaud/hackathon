@@ -1,17 +1,14 @@
-import os
 import chainlit as cl
 from my_secrets import MySecrets
 from typing import cast
-from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from openai.types.responses import ResponseTextDeltaEvent
 from agents import (
     Agent,
     Runner,
-    RunConfig,
-    set_default_openai_client,
+    AsyncOpenAI,
     set_tracing_disabled,
-    set_default_openai_api,
     function_tool,
+    OpenAIChatCompletionsModel,
     GuardrailFunctionOutput,
     InputGuardrailTripwireTriggered,
     OutputGuardrailTripwireTriggered,
@@ -21,18 +18,19 @@ from agents import (
 )
 from pydantic import BaseModel
 
-load_dotenv()
 secrets = MySecrets()
+set_tracing_disabled(True)
 
 def setup_config():
     external_client = AsyncOpenAI(
         api_key=secrets.gemini_api_key,
         base_url=secrets.gemini_api_url,
     )
-    set_default_openai_client(external_client)  
-    set_tracing_disabled(True)  
-    set_default_openai_api("chat_completions")  
-
+    external_client1 = AsyncOpenAI(
+        api_key=secrets.deepseek_api_key,
+        base_url=secrets.deepseek_api_url,
+    ) 
+      
     class Validator(BaseModel):  
         is_foul: bool  
         reasoning: str  
@@ -41,7 +39,10 @@ def setup_config():
         name="Guardrail Check",  
         instructions="Detect if the user's reflection contains foul language.",  
         output_type=Validator,  
-        model=secrets.gemini_api_model,  
+        model=OpenAIChatCompletionsModel( 
+        model=secrets.gemini_api_model,
+        openai_client= external_client,
+        ),  
     )  
 
     @input_guardrail  
@@ -58,8 +59,11 @@ def setup_config():
 
     summarizer = Agent(  
         name="summarizer",  
-        instructions="Summarize the reflection into three concise key takeaways.",  
-        model=secrets.gemini_api_model,  
+        instructions="Summarize the reflection into three concise key takeaways.",
+        model=OpenAIChatCompletionsModel( 
+        model=secrets.deepseek_api_model,
+        openai_client= external_client1
+        ),
     )  
 
     @output_guardrail  
@@ -76,9 +80,12 @@ def setup_config():
 
     coach = Agent(  
         name="Coach",  
-        instructions="Offer multiple mindfulness tips or exercises based on the summary.",  
-        model=secrets.gemini_api_model,  
+        instructions="Offer multiple mindfulness tips or exercises based on the summary.",   
         output_guardrails=[coach_output_guardrail],  
+        model=OpenAIChatCompletionsModel( 
+        model=secrets.gemini_api_model,
+        openai_client= external_client,
+        ),
     )  
 
     triage = Agent(  
@@ -89,14 +96,16 @@ def setup_config():
             "Whenever there is a tool call, provide its name. When there is a handoff, provide the handoff agent name."  
         ),  
         handoffs=[coach],  
-        # tools=[  
-        #     summarizer.as_tool(  
-        #         tool_name="Summarizer",  
-        #         tool_description="Summarize the reflection into three concise key takeaways."  
-        #     )  
-        # ],  
+        tools=[  
+            summarizer.as_tool(  
+                tool_name="Summarizer",  
+                tool_description="Summarize the reflection into three concise key takeaways.")  
+        ],  
         input_guardrails=[reflection_input_guardrail],  
-        model=secrets.gemini_api_model,  
+        model=OpenAIChatCompletionsModel( 
+        model=secrets.gemini_api_model,
+        openai_client= external_client,
+        ),  
     )  
     return triage
 
@@ -105,7 +114,7 @@ async def start():
     triage_agent = setup_config()
     cl.user_session.set("triage_agent", triage_agent)
     cl.user_session.set("chat_history", [])
-    await cl.Message(content="Hi! Welcome to Reflect Coach. Your Daily Reflection Coach!. How was day today").send()
+    await cl.Message(content="Hi! Welcome to Reflect Coach. Your Daily Reflection Coach!. How was day today?").send()
 
 @cl.on_message
 async def main(message: cl.Message):
@@ -115,11 +124,15 @@ async def main(message: cl.Message):
     triage_agent = cast(Agent, cl.user_session.get("triage_agent"))
     user_input = message.content
     try:
-        result = await Runner.run_streamed(triage_agent, user_input)
+        result = Runner.run_streamed(triage_agent, user_input)
         async for event in result.stream_events():
-            if event.type == "raw_response_event" and hasattr(event.data, 'delta'):
+            if event.type == "raw_response_event" and isinstance(event.data, ResponseTextDeltaEvent):
                 token = event.data.delta
                 await msg.stream_token(token)
+                # print(event.data.delta, end="", flush=True)
     except Exception as e:
         error_msg = cl.Message(content=f"Your reflection couldn't be processed: {str(e)}")
         await error_msg.send()
+
+if __name__ == "__main__":
+    asyncio.run(main())        
