@@ -132,7 +132,4 @@ async def main(message: cl.Message):
                 # print(event.data.delta, end="", flush=True)
     except Exception as e:
         error_msg = cl.Message(content=f"Your reflection couldn't be processed: {str(e)}")
-        await error_msg.send()
-
-if __name__ == "__main__":
-    asyncio.run(main())        
+        await error_msg.send()       
