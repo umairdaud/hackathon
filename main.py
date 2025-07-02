@@ -3,12 +3,12 @@ import chainlit as cl
 from my_secrets import MySecrets
 from typing import cast
 from dotenv import load_dotenv
+from openai import AsyncOpenAI
 from agents import (
     Agent,
     Runner,
     RunConfig,
     set_default_openai_client,
-    AsyncOpenAI,
     set_tracing_disabled,
     set_default_openai_api,
     function_tool,
@@ -18,93 +18,87 @@ from agents import (
     RunContextWrapper,
     input_guardrail,
     output_guardrail,
-) 
+)
 from pydantic import BaseModel
 
 load_dotenv()
-
 secrets = MySecrets()
 
 def setup_config():
     external_client = AsyncOpenAI(
-        api_key = secrets.gemini_api_key,
-        base_url = secrets.gemini_api_url,
+        api_key=secrets.gemini_api_key,
+        base_url=secrets.gemini_api_url,
     )
+    set_default_openai_client(external_client)  
+    set_tracing_disabled(True)  
+    set_default_openai_api("chat_completions")  
 
-    set_default_openai_client(external_client)
-    set_tracing_disabled(True)
-    set_default_openai_api("chat_completions")
+    class Validator(BaseModel):  
+        is_foul: bool  
+        reasoning: str  
 
-    # Define Validator for guardrail
-    class Validator(BaseModel):
-        is_foul: bool
-        reasoning: str
+    guardrail_agent = Agent(  
+        name="Guardrail Check",  
+        instructions="Detect if the user's reflection contains foul language.",  
+        output_type=Validator,  
+        model=secrets.gemini_api_model,  
+    )  
 
-    # Set up guardrail agent for foul language detection
-    guardrail_agent = Agent(
-        name = "Guardrail Check",
-        instructions = "Detect if the user's reflection contains foul language.",
-        output_type = Validator,
-        model = secrets.gemini_api_model,
-    )
+    @input_guardrail  
+    async def reflection_input_guardrail(  
+        ctx: RunContextWrapper[None],  
+        agent: Agent,  
+        user_input: str  
+    ) -> GuardrailFunctionOutput:  
+        result = await Runner.run(guardrail_agent, user_input, context=ctx.context)  
+        return GuardrailFunctionOutput(  
+            output_info=result.final_output,  
+            tripwire_triggered=result.final_output.is_foul,  
+        )  
 
-    # Input guardrail: stop before expensive processing if foul language is found
-    @input_guardrail
-    async def reflection_input_guardrail(
-        ctx: RunContextWrapper[None],
-        agent: Agent,
-        user_input: str
-    ) -> GuardrailFunctionOutput:
-        result = await Runner.run(guardrail_agent, user_input, context=ctx.context)
-        return GuardrailFunctionOutput(
-            output_info=result.final_output,
-            tripwire_triggered=result.final_output.is_foul,
-        )
+    summarizer = Agent(  
+        name="summarizer",  
+        instructions="Summarize the reflection into three concise key takeaways.",  
+        model=secrets.gemini_api_model,  
+    )  
 
-    # Core agents: summarizer → coach
-    summarizer = Agent(
-        name = "summarizer",
-        instructions = "Summarize the reflection into three concise key takeaways.",
-        model = secrets.gemini_api_model,
-    )
+    @output_guardrail  
+    async def coach_output_guardrail(  
+        ctx: RunContextWrapper[None],  
+        agent: Agent,  
+        coach_output: str  
+    ) -> GuardrailFunctionOutput:  
+        result = await Runner.run(guardrail_agent, coach_output, context=ctx.context)  
+        return GuardrailFunctionOutput(  
+            output_info=result.final_output,  
+            tripwire_triggered=result.final_output.is_foul,  
+        )  
 
-    # Output guardrail for Coach to ensure no foul advice
-    @output_guardrail
-    async def coach_output_guardrail(
-        ctx: RunContextWrapper[None],
-        agent: Agent,
-        coach_output: str
-    ) -> GuardrailFunctionOutput:
-        result = await Runner.run(guardrail_agent, coach_output, context=ctx.context)
-        return GuardrailFunctionOutput(
-            output_info = result.final_output,
-            tripwire_triggered = result.final_output.is_foul,
-        )
+    coach = Agent(  
+        name="Coach",  
+        instructions="Offer multiple mindfulness tips or exercises based on the summary.",  
+        model=secrets.gemini_api_model,  
+        output_guardrails=[coach_output_guardrail],  
+    )  
 
-    coach = Agent(
-        name = "Coach",
-        instructions = "Offer multiple mindfulness tips or exercises based on the summary.",
-        model = secrets.gemini_api_model,
-        output_guardrails = [coach_output_guardrail],
-    )
-
-    # Triage agent that chains summarizer → coach
-    triage = Agent(
-        name = "Triage",
-        instructions = ( 
-            "Take the user's reflection, use the Summarizer tool to get a summary, "
-            "then hand off to the Coach to provide suggestions based on the summary."
-            "wheneven there is tool call provide its name when there is handoff provide handsoff agent name"
-        ),
-        handoffs = [coach],
-        tools = [
-            summarizer_tool = summarizer.as_tool(
-                tool_name = "Summarizer",
-                tool_description = "Summarize the reflection into three concise key takeaways."),
-                ],
-        input_guardrails = [reflection_input_guardrail],
-        model = secrets.gemini_api_model,
-    )
+    triage = Agent(  
+        name="Triage",  
+        instructions=(   
+            "Take the user's reflection, use the Summarizer tool to get a summary, "  
+            "then hand off to the Coach to provide suggestions based on the summary."  
+            "Whenever there is a tool call, provide its name. When there is a handoff, provide the handoff agent name."  
+        ),  
+        handoffs=[coach],  
+        # tools=[  
+        #     summarizer.as_tool(  
+        #         tool_name="Summarizer",  
+        #         tool_description="Summarize the reflection into three concise key takeaways."  
+        #     )  
+        # ],  
+        input_guardrails=[reflection_input_guardrail],  
+        model=secrets.gemini_api_model,  
+    )  
+    return triage
 
 @cl.on_chat_start
 async def start():
